@@ -83,7 +83,7 @@ def request(server, uri, json_in=True):
 
     try:
         resp = urlopen(req, timeout=DEFAULT_TIMEOUT)
-        resp_body = resp.read()
+        resp_body = resp.read().decode("utf-8")
         if json_in:
             return json.loads(resp_body)
         else:
@@ -235,8 +235,9 @@ def get_live_servers():
         if (len(conf) == 4):
             user = conf[2]
             password = conf[3]
-            headers = {'Authorization': 'Basic %s' %
-                                        base64.b64encode(user + ":" + password)}
+            user_passwd = (user + ":" + password).encode("utf-8")
+            auth_header = base64.b64encode(user_passwd)
+            headers = {'Authorization': 'Basic %s' % auth_header.decode("ascii")}
         else:
             headers = {}
 
@@ -289,4 +290,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    utils.err(sys.version)
     sys.exit(main(sys.argv))
