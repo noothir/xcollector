@@ -14,18 +14,19 @@
 
 """ElasticSearch collector"""  # Because ES is cool, bonsai cool.
 # Tested with ES 0.16.5, 0.17.x, 0.90.1 .
-
-import errno
+import base64
+import re
 import socket
 import sys
 import threading
 import time
-import re
 
 try:
-    import httplib as httplib
+    from urllib2 import urlopen, Request
+    from urllib2 import HTTPError, URLError
 except ImportError:
-    import http.client as httplib
+    from urllib.request import urlopen, Request
+    from urllib.error import HTTPError, URLError
 
 try:
     import json
@@ -35,7 +36,7 @@ except ImportError:
 from collectors.lib import utils
 from collectors.etc import elasticsearch_conf
 
-COLLECTION_INTERVAL = 15  # seconds
+COLLECTION_INTERVAL = 60  # seconds
 DEFAULT_TIMEOUT = 10.0  # seconds
 
 # regexes to separate differences in version numbers
@@ -48,6 +49,14 @@ STATUS_MAP = {
     "red": 2,
 }
 
+rootmetric = "elasticsearch"
+
+REGISTERED_METRIC_TAGS = {
+    rootmetric+".node.ingest.pipelines":"pipeline",
+    rootmetric+".node.adaptive_selection":"asid",
+    rootmetric+".node.thread_pool":"threadpool"
+}
+
 
 class ESError(RuntimeError):
     """Exception raised if we don't get a 200 OK from ElasticSearch."""
@@ -57,16 +66,33 @@ class ESError(RuntimeError):
         self.resp = resp
 
 
-def request(server, uri, json_in=True):
-    """Does a GET request of the given uri on the given HTTPConnection."""
-    server.request("GET", uri)
-    resp = server.getresponse()
-    if resp.status != httplib.OK:
-        raise ESError(resp)
-    if json_in:
-        return json.loads(resp.read())
+def build_http_url(host, port, uri):
+    if port == 443:
+        protocol = "https"
     else:
-        return resp.read()
+        protocol = "http"
+    return "%s://%s:%s%s" % (protocol, host, port, uri)
+
+
+def request(server, uri, json_in=True):
+    url = build_http_url(server["host"], server["port"], uri)
+    headers = server["headers"]
+    req = Request(url)
+    for key in headers.keys():
+        req.add_header(key, headers[key])
+
+    try:
+        resp = urlopen(req, timeout=DEFAULT_TIMEOUT)
+        resp_body = resp.read()
+        if json_in:
+            return json.loads(resp_body)
+        else:
+            return resp_body
+    except HTTPError as e:
+        utils.err(e)
+    except URLError as e:
+        utils.err(e)
+        utils.err('We failed to reach a server.')
 
 
 def cluster_health(server):
@@ -82,7 +108,7 @@ def cluster_master_node(server):
 
 
 def index_stats(server):
-    return request(server, "/_cat/indices?v&bytes=b", json_in=False)
+    return request(server, "/_all/_stats")
 
 
 def node_status(server):
@@ -93,25 +119,23 @@ def node_stats(server, version):
     # API changed in v1.0
     if PRE_VER1.match(version):
         url = "/_cluster/nodes/_local/stats"
-    # elif VER1.match(version):
-    #   url = "/_nodes/_local/stats"
     else:
-        url = "/_nodes/_local/stats"
+        url = "/_nodes/stats"
     return request(server, url)
 
 
 def printmetric(metric, ts, value, tags):
     # Warning, this should be called inside a lock
     if tags:
-        tags = " " + " ".join("%s=%s" % (name.replace(" ", ""), value.replace(" ", ""))
+        tags = " " + " ".join("%s=%s" % (name.replace(" ", ""), value.replace(" ", "").replace(":", "-"))
                               for name, value in tags.items())
     else:
         tags = ""
     print("%s %d %s %s"
-           % (metric, ts, value, tags))
+          % (metric, ts, value, tags))
 
 
-def _traverse(metric, stats, ts, tags):
+def _traverse(metric, stats, ts, tags, check=True):
     """
        Recursively traverse the json tree and print out leaf numeric values
        Please make sure you call this inside a lock and don't add locking
@@ -123,7 +147,15 @@ def _traverse(metric, stats, ts, tags):
             ts = stats["timestamp"] / 1000  # ms -> s
         for key in list(stats.keys()):
             if key != "timestamp":
-                _traverse(metric + "." + key, stats[key], ts, tags)
+                if metric in REGISTERED_METRIC_TAGS:
+                    if check:
+                        registeredMetricTags = tags.copy()
+                        registeredMetricTags[REGISTERED_METRIC_TAGS.get(metric)] = key
+                        _traverse(metric, stats[key], ts, registeredMetricTags, False)
+                    else:
+                        _traverse(metric + "." + key, stats[key], ts, tags)
+                else:
+                    _traverse(metric + "." + key, stats[key], ts, tags)
     if isinstance(stats, (list, set, tuple)):
         count = 0
         for value in stats:
@@ -136,32 +168,31 @@ def _traverse(metric, stats, ts, tags):
     return
 
 
-def _collect_indices(server, metric, tags, lock):
+def _collect_indices_total(metric, stats, tags, lock):
     ts = int(time.time())
-    rawtable = index_stats(server).split("\n")
-    header = rawtable.pop(0).strip()
-    headerlist = [x.strip() for x in header.split()]
-    for line in rawtable:
-        # Copy the cluster tag
-        newtags = {"cluster": tags["cluster"]}
-        # Now parse each input
-        values = line.split()
-        count = 0
-        for value in values:
-            try:
-                value = float(value)
-                if int(value) == value:
-                    value = int(value)
-                # now print value
-                with lock:
-                    printmetric(metric + ".cluster.byindex." + headerlist[count], ts, value, newtags)
-            except ValueError as ve:
-                # add this as a tag
-                newtags[headerlist[count]] = value
-            count += 1
+    with lock:
+        _traverse(metric, stats, ts, tags)
 
 
-def _collect_master(server, nodeid, metric, tags, lock):
+def _collect_indices_stats(metric, indexStats, tags, lock):
+    ts = int(time.time())
+    with lock:
+        _traverse(metric, indexStats, ts, tags)
+
+
+def _collect_indices(server, metric, tags, lock):
+    indexStats = index_stats(server)
+    totalStats = indexStats["_all"]
+    _collect_indices_total(metric + ".indices", totalStats, tags, lock)
+
+    indicesStats = indexStats["indices"]
+    while len(indicesStats) != 0:
+        indexId, stats = indicesStats.popitem()
+        indextags = {"cluster": tags["cluster"], "index": indexId}
+        _collect_indices_stats(metric + ".indices.byindex", stats, indextags, lock)
+
+
+def _collect_master(server, metric, tags, lock):
     ts = int(time.time())
     chealth = cluster_health(server)
     if "status" in chealth:
@@ -179,44 +210,57 @@ def _collect_master(server, nodeid, metric, tags, lock):
 
 def _collect_server(server, version, lock):
     ts = int(time.time())
-    rootmetric = "elasticsearch"
     nstats = node_stats(server, version)
     cluster_name = nstats["cluster_name"]
-    nodeid, nstats = nstats["nodes"].popitem()
-    node_name = nstats["name"]
-    tags = {"cluster": cluster_name, "node": node_name}
-    # tags.update(nstats["attributes"])
+    _collect_cluster_stats(cluster_name, lock, rootmetric, server)
+    while len(nstats["nodes"]) != 0:
+        nodeid, nodeStats = nstats["nodes"].popitem()
+        node_name = nodeStats["name"]
+        tags = {"cluster": cluster_name, "node": node_name, "nodeid": nodeid}
+        with lock:
+            _traverse(rootmetric+".node", nodeStats, ts, tags)
 
-    is_master = nodeid == cluster_master_node(server)
-    with lock:
-        printmetric(rootmetric + ".is_master", ts, is_master, tags)
-    if is_master:
-        _collect_master(server, nodeid, rootmetric, tags, lock)
 
-        _collect_indices(server, rootmetric, tags, lock)
+def _collect_cluster_stats(cluster_name, lock, rootmetric, server):
+    clusterTags = {"cluster": cluster_name}
+    _collect_master(server, rootmetric, clusterTags, lock)
+    _collect_indices(server, rootmetric, clusterTags, lock)
 
-    with lock:
-        _traverse(rootmetric, nstats, ts, tags)
+
+def get_live_servers():
+    servers = []
+    for conf in elasticsearch_conf.get_servers():
+        host = conf[0]
+        port = conf[1]
+        if (len(conf) == 4):
+            user = conf[2]
+            password = conf[3]
+            headers = {'Authorization': 'Basic %s' %
+                                        base64.b64encode(user + ":" + password)}
+        else:
+            headers = {}
+
+        server = {"host": host, "port": port, "headers": headers}
+        try:
+            status = node_status(server)
+            if status:
+                servers.append(server)
+        except Exception as err:
+            utils.err(err)
+            utils.err("Error getting node status")
+            continue
+    return servers
 
 
 def main(argv):
     utils.drop_privileges()
     socket.setdefaulttimeout(DEFAULT_TIMEOUT)
-    servers = []
 
     if json is None:
         utils.err("This collector requires the `json' Python module.")
         return 1
 
-    for conf in elasticsearch_conf.get_servers():
-        server = httplib.HTTPConnection(*conf)
-        try:
-            server.connect()
-        except socket.error as sock_err:
-            if sock_err.errno == errno.ECONNREFUSED:
-                continue
-            raise
-        servers.append(server)
+    servers = get_live_servers()
 
     if len(servers) == 0:
         return 13  # No ES running, ask tcollector to not respawn us.
@@ -224,14 +268,23 @@ def main(argv):
     lock = threading.Lock()
     while True:
         threads = []
+        t0 = int(time.time())
+        utils.err("Fetching elasticsearch metrics")
         for server in servers:
-            status = node_status(server)
+            try:
+                status = node_status(server)
+            except Exception as err:
+                utils.err(err)
+                utils.err("Error getting node status")
+                continue
             version = status["version"]["number"]
             t = threading.Thread(target=_collect_server, args=(server, version, lock))
             t.start()
             threads.append(t)
         for thread in threads:
-            thread.join()
+            thread.join(DEFAULT_TIMEOUT)
+
+        utils.err("Done fetching elasticsearch metrics in [%d]s " % (int(time.time()) - t0))
         time.sleep(COLLECTION_INTERVAL)
 
 
