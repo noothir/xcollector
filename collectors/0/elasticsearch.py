@@ -137,7 +137,7 @@ def printmetric(metric, ts, value, tags):
           % (metric, ts, value, tags))
 
 
-def _traverse(metric, stats, timeseries, tags, check=True):
+def _traverse(metric, stats, timestamp, tags, check=True):
     """
        Recursively traverse the json tree and print out leaf numeric values
        Please make sure you call this inside a lock and don't add locking
@@ -146,27 +146,27 @@ def _traverse(metric, stats, timeseries, tags, check=True):
     # print metric,stats,ts,tags
     if isinstance(stats, dict):
         if "timestamp" in stats:
-            timeseries = stats["timestamp"] / 1000  # ms -> s
+            timestamp = stats["timestamp"] / 1000  # ms -> s
         for key in list(stats.keys()):
             if key != "timestamp":
                 if metric in REGISTERED_METRIC_TAGS:
                     if check:
                         registered_tags = tags.copy()
                         registered_tags[REGISTERED_METRIC_TAGS.get(metric)] = key
-                        _traverse(metric, stats[key], timeseries, registered_tags, False)
+                        _traverse(metric, stats[key], timestamp, registered_tags, False)
                     else:
-                        _traverse(metric + "." + key, stats[key], timeseries, tags)
+                        _traverse(metric + "." + key, stats[key], timestamp, tags)
                 else:
-                    _traverse(metric + "." + key, stats[key], timeseries, tags)
+                    _traverse(metric + "." + key, stats[key], timestamp, tags)
     if isinstance(stats, (list, set, tuple)):
         count = 0
         for value in stats:
-            _traverse(metric + "." + str(count), value, timeseries, tags)
+            _traverse(metric + "." + str(count), value, timestamp, tags)
             count += 1
     if utils.is_numeric(stats) and not isinstance(stats, bool):
         if isinstance(stats, int):
             stats = int(stats)
-        printmetric(metric, timeseries, stats, tags)
+        printmetric(metric, timestamp, stats, tags)
     return
 
 

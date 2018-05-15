@@ -18,5 +18,5 @@ def get_servers():
   Returns:
     An iterable of tuples of (host, port, user, password)
   """
-  return [ ("localhost", 9200, "user","password") ]
+  return [ ("localhost", 9200) ]
 
