@@ -75,6 +75,7 @@ def _build_http_url(host, port, uri):
 
 
 def _request(server, uri, json_in=True):
+    utils.err("Requesting : %s" % uri)
     url = _build_http_url(server["host"], server["port"], uri)
     headers = server["headers"]
     req = Request(url)
@@ -268,12 +269,7 @@ def main(argv):
         ts0 = int(time.time())
         utils.err("Fetching elasticsearch metrics")
         for server in servers:
-            try:
-                status = node_status(server)
-            except Exception as err:
-                utils.err(err)
-                utils.err("Error getting node status")
-                continue
+            status = node_status(server)
             version = status["version"]["number"]
             t = threading.Thread(target=_collect_server, args=(server, version, lock))
             t.start()
@@ -282,6 +278,7 @@ def main(argv):
             thread.join(DEFAULT_TIMEOUT)
 
         utils.err("Done fetching elasticsearch metrics in [%d]s " % (int(time.time()) - ts0))
+        sys.stdout.flush()
         time.sleep(COLLECTION_INTERVAL)
 
 
