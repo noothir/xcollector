@@ -233,7 +233,7 @@ def _get_live_servers():
     for conf in elasticsearch_conf.get_servers():
         host = conf[0]
         port = conf[1]
-        if (len(conf) == 4):
+        if len(conf) == 4:
             user = conf[2]
             password = conf[3]
             user_passwd = (user + ":" + password).encode("utf-8")
@@ -243,14 +243,9 @@ def _get_live_servers():
             headers = {}
 
         server = {"host": host, "port": port, "headers": headers}
-        try:
-            status = node_status(server)
-            if status:
-                servers.append(server)
-        except Exception as err:
-            utils.err(err)
-            utils.err("Error getting node status")
-            continue
+        status = node_status(server)
+        if status:
+            servers.append(server)
     return servers
 
 
