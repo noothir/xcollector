@@ -171,14 +171,14 @@ def _traverse(metric, stats, timestamp, tags, check=True):
     return
 
 
-def _collect_indices_total(metric, stats, tags, lock, ts):
+def _collect_indices_total(metric, stats, tags, lock, timestamp):
     with lock:
-        _traverse(metric, stats, ts, tags)
+        _traverse(metric, stats, timestamp, tags)
 
 
-def _collect_indices_stats(metric, index_stats, tags, lock, ts):
+def _collect_indices_stats(metric, index_stats, tags, lock, timestamp):
     with lock:
-        _traverse(metric, index_stats, ts, tags)
+        _traverse(metric, index_stats, timestamp, tags)
 
 
 def _collect_indices(server, metric, tags, lock):
