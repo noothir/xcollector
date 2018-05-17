@@ -131,7 +131,7 @@ def printmetric(metric, ts, value, tags):
     if tags:
         tags = " " + \
                " ".join("%s=%s" % (name.replace(" ", ""), value.replace(" ", "").replace(":", "-"))
-                        for name, value in tags.items())
+               for name, value in tags.items())
     else:
         tags = ""
     print("%s %d %s %s"
